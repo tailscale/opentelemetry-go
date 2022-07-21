@@ -31,8 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/internal/otlpconfig"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/internal/otlptracetest"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
@@ -215,7 +215,7 @@ type mockCollectorConfig struct {
 
 func (c *mockCollectorConfig) fillInDefaults() {
 	if c.TracesURLPath == "" {
-		c.TracesURLPath = otlpconfig.DefaultTracesPath
+		c.TracesURLPath = otlptracehttp.DefaultTracesPath
 	}
 }
 

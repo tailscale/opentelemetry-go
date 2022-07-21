@@ -16,48 +16,132 @@ package otlptracehttp // import "go.opentelemetry.io/otel/exporters/otlp/otlptra
 
 import (
 	"crypto/tls"
+	"io/ioutil"
+	"net/url"
+	"os"
+	"path"
+	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/exporters/otlp/internal/envconfig"
 	"go.opentelemetry.io/otel/exporters/otlp/internal/retry"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/internal/otlpconfig"
 )
 
 // Compression describes the compression used for payloads sent to the
 // collector.
-type Compression otlpconfig.Compression
+type Compression int
 
 const (
 	// NoCompression tells the driver to send payloads without
 	// compression.
-	NoCompression = Compression(otlpconfig.NoCompression)
+	NoCompression Compression = iota
 	// GzipCompression tells the driver to send payloads after
 	// compressing them with gzip.
-	GzipCompression = Compression(otlpconfig.GzipCompression)
+	GzipCompression
 )
 
 // Option applies an option to the HTTP client.
 type Option interface {
-	applyHTTPOption(otlpconfig.Config) otlpconfig.Config
-}
-
-func asHTTPOptions(opts []Option) []otlpconfig.HTTPOption {
-	converted := make([]otlpconfig.HTTPOption, len(opts))
-	for i, o := range opts {
-		converted[i] = otlpconfig.NewHTTPOption(o.applyHTTPOption)
-	}
-	return converted
+	applyHTTPOption(Config) Config
 }
 
 // RetryConfig defines configuration for retrying batches in case of export
 // failure using an exponential backoff.
 type RetryConfig retry.Config
 
-type wrappedOption struct {
-	otlpconfig.HTTPOption
+func ApplyHTTPEnvConfigs(cfg Config) Config {
+	opts := getOptionsFromEnv()
+	for _, opt := range opts {
+		cfg = opt.applyHTTPOption(cfg)
+	}
+	return cfg
 }
 
-func (w wrappedOption) applyHTTPOption(cfg otlpconfig.Config) otlpconfig.Config {
-	return w.ApplyHTTPOption(cfg)
+// DefaultEnvOptionsReader is the default environments reader.
+var DefaultEnvOptionsReader = envconfig.EnvOptionsReader{
+	GetEnv:    os.Getenv,
+	ReadFile:  ioutil.ReadFile,
+	Namespace: "OTEL_EXPORTER_OTLP",
+}
+
+func getOptionsFromEnv() []Option {
+	opts := []Option{}
+
+	DefaultEnvOptionsReader.Apply(
+		envconfig.WithURL("ENDPOINT", func(u *url.URL) {
+			opts = append(opts, withEndpointScheme(u))
+			opts = append(opts, option(func(cfg Config) Config {
+				cfg.Traces.Endpoint = u.Host
+				// For OTLP/HTTP endpoint URLs without a per-signal
+				// configuration, the passed endpoint is used as a base URL
+				// and the signals are sent to these paths relative to that.
+				cfg.Traces.URLPath = path.Join(u.Path, DefaultTracesPath)
+				return cfg
+			}))
+		}),
+		envconfig.WithURL("TRACES_ENDPOINT", func(u *url.URL) {
+			opts = append(opts, withEndpointScheme(u))
+			opts = append(opts, option(func(cfg Config) Config {
+				cfg.Traces.Endpoint = u.Host
+				// For endpoint URLs for OTLP/HTTP per-signal variables, the
+				// URL MUST be used as-is without any modification. The only
+				// exception is that if an URL contains no path part, the root
+				// path / MUST be used.
+				path := u.Path
+				if path == "" {
+					path = "/"
+				}
+				cfg.Traces.URLPath = path
+				return cfg
+			}))
+		}),
+		envconfig.WithTLSConfig("CERTIFICATE", func(c *tls.Config) { opts = append(opts, WithTLSClientConfig(c)) }),
+		envconfig.WithTLSConfig("TRACES_CERTIFICATE", func(c *tls.Config) { opts = append(opts, WithTLSClientConfig(c)) }),
+		envconfig.WithHeaders("HEADERS", func(h map[string]string) { opts = append(opts, WithHeaders(h)) }),
+		envconfig.WithHeaders("TRACES_HEADERS", func(h map[string]string) { opts = append(opts, WithHeaders(h)) }),
+		WithEnvCompression("COMPRESSION", func(c Compression) { opts = append(opts, WithCompression(c)) }),
+		WithEnvCompression("TRACES_COMPRESSION", func(c Compression) { opts = append(opts, WithCompression(c)) }),
+		envconfig.WithDuration("TIMEOUT", func(d time.Duration) { opts = append(opts, WithTimeout(d)) }),
+		envconfig.WithDuration("TRACES_TIMEOUT", func(d time.Duration) { opts = append(opts, WithTimeout(d)) }),
+	)
+
+	return opts
+}
+
+// WithEnvCompression retrieves the specified config and passes it to ConfigFn as a Compression.
+func WithEnvCompression(n string, fn func(Compression)) func(e *envconfig.EnvOptionsReader) {
+	return func(e *envconfig.EnvOptionsReader) {
+		if v, ok := e.GetEnvValue(n); ok {
+			cp := NoCompression
+			if v == "gzip" {
+				cp = GzipCompression
+			}
+
+			fn(cp)
+		}
+	}
+}
+
+type option func(cfg Config) Config
+
+func (o option) applyHTTPOption(cfg Config) Config {
+	return o(cfg)
+}
+
+func withEndpointScheme(u *url.URL) Option {
+	switch strings.ToLower(u.Scheme) {
+	case "http", "unix":
+		return WithInsecure()
+	default:
+		return WithSecure()
+	}
+}
+
+func WithSecure() Option {
+	return option(func(cfg Config) Config {
+		cfg.Traces.Insecure = false
+		return cfg
+	})
 }
 
 // WithEndpoint allows one to set the address of the collector
@@ -66,44 +150,66 @@ func (w wrappedOption) applyHTTPOption(cfg otlpconfig.Config) otlpconfig.Config 
 // the default endpoint (localhost:4318). Note that the endpoint
 // must not contain any URL path.
 func WithEndpoint(endpoint string) Option {
-	return wrappedOption{otlpconfig.WithEndpoint(endpoint)}
+	return option(func(cfg Config) Config {
+		cfg.Traces.Endpoint = endpoint
+		return cfg
+	})
 }
 
 // WithCompression tells the driver to compress the sent data.
 func WithCompression(compression Compression) Option {
-	return wrappedOption{otlpconfig.WithCompression(otlpconfig.Compression(compression))}
+	return option(func(cfg Config) Config {
+		cfg.Traces.Compression = compression
+		return cfg
+	})
 }
 
 // WithURLPath allows one to override the default URL path used
 // for sending traces. If unset, default ("/v1/traces") will be used.
 func WithURLPath(urlPath string) Option {
-	return wrappedOption{otlpconfig.WithURLPath(urlPath)}
+	return option(func(cfg Config) Config {
+		cfg.Traces.URLPath = urlPath
+		return cfg
+	})
 }
 
 // WithTLSClientConfig can be used to set up a custom TLS
 // configuration for the client used to send payloads to the
 // collector. Use it if you want to use a custom certificate.
 func WithTLSClientConfig(tlsCfg *tls.Config) Option {
-	return wrappedOption{otlpconfig.WithTLSClientConfig(tlsCfg)}
+	return option(func(cfg Config) Config {
+		cfg.Traces.TLSCfg = tlsCfg.Clone()
+		return cfg
+	})
+
 }
 
 // WithInsecure tells the driver to connect to the collector using the
 // HTTP scheme, instead of HTTPS.
 func WithInsecure() Option {
-	return wrappedOption{otlpconfig.WithInsecure()}
+	return option(func(cfg Config) Config {
+		cfg.Traces.Insecure = true
+		return cfg
+	})
 }
 
 // WithHeaders allows one to tell the driver to send additional HTTP
 // headers with the payloads. Specifying headers like Content-Length,
 // Content-Encoding and Content-Type may result in a broken driver.
 func WithHeaders(headers map[string]string) Option {
-	return wrappedOption{otlpconfig.WithHeaders(headers)}
+	return option(func(cfg Config) Config {
+		cfg.Traces.Headers = headers
+		return cfg
+	})
 }
 
 // WithTimeout tells the driver the max waiting time for the backend to process
 // each spans batch.  If unset, the default will be 10 seconds.
 func WithTimeout(duration time.Duration) Option {
-	return wrappedOption{otlpconfig.WithTimeout(duration)}
+	return option(func(cfg Config) Config {
+		cfg.Traces.Timeout = duration
+		return cfg
+	})
 }
 
 // WithRetry configures the retry policy for transient errors that may occurs
@@ -112,5 +218,8 @@ func WithTimeout(duration time.Duration) Option {
 // policy will retry after 5 seconds and increase exponentially after each
 // error for a total of 1 minute.
 func WithRetry(rc RetryConfig) Option {
-	return wrappedOption{otlpconfig.WithRetry(retry.Config(rc))}
+	return option(func(cfg Config) Config {
+		cfg.RetryConfig = retry.Config(rc)
+		return cfg
+	})
 }

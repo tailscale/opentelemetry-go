@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -30,9 +31,9 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"go.opentelemetry.io/otel/exporters/otlp/internal"
 	"go.opentelemetry.io/otel/exporters/otlp/internal/retry"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/internal/otlpconfig"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
@@ -65,19 +66,75 @@ var ourTransport = &http.Transport{
 
 type client struct {
 	name        string
-	cfg         otlpconfig.SignalConfig
-	generalCfg  otlpconfig.Config
+	cfg         SignalConfig
+	generalCfg  Config
 	requestFunc retry.RequestFunc
 	client      *http.Client
 	stopCh      chan struct{}
 	stopOnce    sync.Once
 }
 
+type (
+	SignalConfig struct {
+		Endpoint    string
+		Insecure    bool
+		TLSCfg      *tls.Config
+		Headers     map[string]string
+		Compression Compression
+		Timeout     time.Duration
+		URLPath     string
+	}
+
+	Config struct {
+		// Signal specific configurations
+		Traces SignalConfig
+
+		RetryConfig retry.Config
+	}
+)
+
+const (
+	// DefaultTracesPath is a default URL path for endpoint that
+	// receives spans.
+	DefaultTracesPath string = "/v1/traces"
+	// DefaultTimeout is a default max waiting time for the backend to process
+	// each span batch.
+	DefaultTimeout time.Duration = 10 * time.Second
+)
+
+const (
+	// DefaultCollectorHTTPPort is the default HTTP port of the collector.
+	DefaultCollectorHTTPPort uint16 = 4318
+	// DefaultCollectorHost is the host address the Exporter will attempt
+	// connect to if no collector address is provided.
+	DefaultCollectorHost string = "localhost"
+)
+
+// NewHTTPConfig returns a new Config with all settings applied from opts and
+// any unset setting using the default HTTP config values.
+func NewHTTPConfig(opts ...Option) Config {
+	cfg := Config{
+		Traces: SignalConfig{
+			Endpoint:    fmt.Sprintf("%s:%d", DefaultCollectorHost, DefaultCollectorHTTPPort),
+			URLPath:     DefaultTracesPath,
+			Compression: NoCompression,
+			Timeout:     DefaultTimeout,
+		},
+		RetryConfig: retry.DefaultConfig,
+	}
+	cfg = ApplyHTTPEnvConfigs(cfg)
+	for _, opt := range opts {
+		cfg = opt.applyHTTPOption(cfg)
+	}
+	cfg.Traces.URLPath = internal.CleanPath(cfg.Traces.URLPath, DefaultTracesPath)
+	return cfg
+}
+
 var _ otlptrace.Client = (*client)(nil)
 
 // NewClient creates a new HTTP trace client.
 func NewClient(opts ...Option) otlptrace.Client {
-	cfg := otlpconfig.NewHTTPConfig(asHTTPOptions(opts)...)
+	cfg := NewHTTPConfig(opts...)
 
 	httpClient := &http.Client{
 		Transport: ourTransport,
