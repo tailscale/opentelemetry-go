@@ -834,7 +834,6 @@ go.opentelemetry.io/build-tools/multimod v0.0.0-20220706175322-58de0d25b85c h1:N
 go.opentelemetry.io/build-tools/multimod v0.0.0-20220706175322-58de0d25b85c/go.mod h1:EOBbXCes6aVxWqvSy3v1AJD8vtC4++fW1UH5AB8W4uM=
 go.opentelemetry.io/build-tools/semconvgen v0.0.0-20220706175322-58de0d25b85c h1:sdRLGv2B9aIRQdLLKlQ6RT/N5MOgsDI+UeYQqNP1g5I=
 go.opentelemetry.io/build-tools/semconvgen v0.0.0-20220706175322-58de0d25b85c/go.mod h1:5ykZFab0x3jatwG5Rf2idlko5e5Z42XsyJLMg4h35bg=
-go.opentelemetry.io/proto/otlp v0.7.0/go.mod h1:PqfVotwruBrMGOCsRd/89rSnXhoiJIqeYNgFYFoEGnI=
 go.uber.org/atomic v1.3.2/go.mod h1:gD2HeocX3+yG+ygLZcrzQJaqmWj9AIm7n08wl/qW/PE=
 go.uber.org/atomic v1.4.0/go.mod h1:gD2HeocX3+yG+ygLZcrzQJaqmWj9AIm7n08wl/qW/PE=
 go.uber.org/atomic v1.5.0/go.mod h1:sABNBOSYdrvTF6hTgEIbc7YasKWGhgEQZyfxyTvoXHQ=
