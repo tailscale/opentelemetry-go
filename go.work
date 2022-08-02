@@ -1,0 +1,26 @@
+go 1.18
+
+replace go.opentelemetry.io/proto/otlp => github.com/tailscale/opentelemetry-proto-go/otlp v0.18.0-ts
+
+use (
+	.
+	./bridge/opencensus
+	./bridge/opencensus/test
+	./bridge/opentracing
+	./exporters/jaeger
+	./exporters/otlp/internal/retry
+	./exporters/otlp/otlpmetric
+	./exporters/otlp/otlpmetric/otlpmetrichttp
+	./exporters/otlp/otlptrace
+	./exporters/otlp/otlptrace/otlptracehttp
+	./exporters/prometheus
+	./exporters/stdout/stdoutmetric
+	./exporters/stdout/stdouttrace
+	./exporters/zipkin
+	./internal/tools
+	./metric
+	./schema
+	./sdk
+	./sdk/metric
+	./trace
+)
