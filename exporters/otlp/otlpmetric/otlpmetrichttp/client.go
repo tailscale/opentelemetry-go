@@ -18,9 +18,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,26 +30,26 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"go.opentelemetry.io/otel/exporters/otlp/internal/retry"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/internal/otlpconfig"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp/internal"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp/internal/oconf"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp/internal/retry"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
-const contentTypeProto = "application/x-protobuf"
-
-var gzPool = sync.Pool{
-	New: func() interface{} {
-		w := gzip.NewWriter(ioutil.Discard)
-		return w
-	},
+type client struct {
+	// req is cloned for every upload the client makes.
+	req         *http.Request
+	compression Compression
+	requestFunc retry.RequestFunc
+	httpClient  *http.Client
 }
 
 // Keep it in sync with golang's DefaultTransport from net/http! We
 // have our own copy to avoid handling a situation where the
 // DefaultTransport is overwritten with some different implementation
-// of http.RoundTripper or it's modified by other package.
+// of http.RoundTripper or it's modified by another package.
 var ourTransport = &http.Transport{
 	Proxy: http.ProxyFromEnvironment,
 	DialContext: (&net.Dialer{
@@ -63,20 +63,8 @@ var ourTransport = &http.Transport{
 	ExpectContinueTimeout: 1 * time.Second,
 }
 
-type client struct {
-	name        string
-	cfg         otlpconfig.SignalConfig
-	generalCfg  otlpconfig.Config
-	requestFunc retry.RequestFunc
-	client      *http.Client
-	stopCh      chan struct{}
-	stopOnce    sync.Once
-}
-
-// NewClient creates a new HTTP metric client.
-func NewClient(opts ...Option) otlpmetric.Client {
-	cfg := otlpconfig.NewHTTPConfig(asHTTPOptions(opts)...)
-
+// newClient creates a new HTTP metric client.
+func newClient(cfg oconf.Config) (*client, error) {
 	httpClient := &http.Client{
 		Transport: ourTransport,
 		Timeout:   cfg.Metrics.Timeout,
@@ -87,88 +75,131 @@ func NewClient(opts ...Option) otlpmetric.Client {
 		httpClient.Transport = transport
 	}
 
-	stopCh := make(chan struct{})
+	u := &url.URL{
+		Scheme: "https",
+		Host:   cfg.Metrics.Endpoint,
+		Path:   cfg.Metrics.URLPath,
+	}
+	if cfg.Metrics.Insecure {
+		u.Scheme = "http"
+	}
+	// Body is set when this is cloned during upload.
+	req, err := http.NewRequest(http.MethodPost, u.String(), http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+
+	userAgent := "OTel Go OTLP over HTTP/protobuf metrics exporter/" + Version()
+	req.Header.Set("User-Agent", userAgent)
+
+	if n := len(cfg.Metrics.Headers); n > 0 {
+		for k, v := range cfg.Metrics.Headers {
+			req.Header.Set(k, v)
+		}
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+
 	return &client{
-		name:        "metrics",
-		cfg:         cfg.Metrics,
-		generalCfg:  cfg,
+		compression: Compression(cfg.Metrics.Compression),
+		req:         req,
 		requestFunc: cfg.RetryConfig.RequestFunc(evaluate),
-		stopCh:      stopCh,
-		client:      httpClient,
-	}
+		httpClient:  httpClient,
+	}, nil
 }
 
-// Start does nothing in a HTTP client.
-func (d *client) Start(ctx context.Context) error {
-	// nothing to do
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	return nil
+// Shutdown shuts down the client, freeing all resources.
+func (c *client) Shutdown(ctx context.Context) error {
+	// The otlpmetric.Exporter synchronizes access to client methods and
+	// ensures this is called only once. The only thing that needs to be done
+	// here is to release any computational resources the client holds.
+
+	c.requestFunc = nil
+	c.httpClient = nil
+	return ctx.Err()
 }
 
-// Stop shuts down the client and interrupt any in-flight request.
-func (d *client) Stop(ctx context.Context) error {
-	d.stopOnce.Do(func() {
-		close(d.stopCh)
-	})
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	return nil
-}
+// UploadMetrics sends protoMetrics to the connected endpoint.
+//
+// Retryable errors from the server will be handled according to any
+// RetryConfig the client was created with.
+func (c *client) UploadMetrics(ctx context.Context, protoMetrics *metricpb.ResourceMetrics) error {
+	// The otlpmetric.Exporter synchronizes access to client methods, and
+	// ensures this is not called after the Exporter is shutdown. Only thing
+	// to do here is send data.
 
-// UploadMetrics sends a batch of metrics to the collector.
-func (d *client) UploadMetrics(ctx context.Context, protoMetrics *metricpb.ResourceMetrics) error {
 	pbRequest := &colmetricpb.ExportMetricsServiceRequest{
 		ResourceMetrics: []*metricpb.ResourceMetrics{protoMetrics},
 	}
-	rawRequest, err := proto.Marshal(pbRequest)
+	body, err := proto.Marshal(pbRequest)
+	if err != nil {
+		return err
+	}
+	request, err := c.newRequest(ctx, body)
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := d.contextWithStop(ctx)
-	defer cancel()
-
-	request, err := d.newRequest(rawRequest)
-	if err != nil {
-		return err
-	}
-
-	return d.requestFunc(ctx, func(ctx context.Context) error {
+	return c.requestFunc(ctx, func(iCtx context.Context) error {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-iCtx.Done():
+			return iCtx.Err()
 		default:
 		}
 
-		request.reset(ctx)
-		resp, err := d.client.Do(request.Request)
+		request.reset(iCtx)
+		resp, err := c.httpClient.Do(request.Request)
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && urlErr.Temporary() {
+			return newResponseError(http.Header{})
+		}
 		if err != nil {
 			return err
 		}
 
 		var rErr error
-		switch resp.StatusCode {
-		case http.StatusOK:
+		switch sc := resp.StatusCode; {
+		case sc >= 200 && sc <= 299:
 			// Success, do not retry.
-		case http.StatusTooManyRequests,
-			http.StatusServiceUnavailable:
+
+			// Read the partial success message, if any.
+			var respData bytes.Buffer
+			if _, err := io.Copy(&respData, resp.Body); err != nil {
+				return err
+			}
+			if respData.Len() == 0 {
+				return nil
+			}
+
+			if resp.Header.Get("Content-Type") == "application/x-protobuf" {
+				var respProto colmetricpb.ExportMetricsServiceResponse
+				if err := proto.Unmarshal(respData.Bytes(), &respProto); err != nil {
+					return err
+				}
+
+				if respProto.PartialSuccess != nil {
+					msg := respProto.PartialSuccess.GetErrorMessage()
+					n := respProto.PartialSuccess.GetRejectedDataPoints()
+					if n != 0 || msg != "" {
+						err := internal.MetricPartialSuccessError(n, msg)
+						otel.Handle(err)
+					}
+				}
+			}
+			return nil
+		case sc == http.StatusTooManyRequests,
+			sc == http.StatusBadGateway,
+			sc == http.StatusServiceUnavailable,
+			sc == http.StatusGatewayTimeout:
 			// Retry-able failure.
 			rErr = newResponseError(resp.Header)
 
 			// Going to retry, drain the body to reuse the connection.
-			if _, err := io.Copy(ioutil.Discard, resp.Body); err != nil {
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 				_ = resp.Body.Close()
 				return err
 			}
 		default:
-			rErr = fmt.Errorf("failed to send %s to %s: %s", d.name, request.URL, resp.Status)
+			rErr = fmt.Errorf("failed to send metrics to %s: %s", request.URL, resp.Status)
 		}
 
 		if err := resp.Body.Close(); err != nil {
@@ -178,20 +209,18 @@ func (d *client) UploadMetrics(ctx context.Context, protoMetrics *metricpb.Resou
 	})
 }
 
-func (d *client) newRequest(body []byte) (request, error) {
-	u := url.URL{Scheme: d.getScheme(), Host: d.cfg.Endpoint, Path: d.cfg.URLPath}
-	r, err := http.NewRequest(http.MethodPost, u.String(), nil)
-	if err != nil {
-		return request{Request: r}, err
-	}
+var gzPool = sync.Pool{
+	New: func() interface{} {
+		w := gzip.NewWriter(io.Discard)
+		return w
+	},
+}
 
-	for k, v := range d.cfg.Headers {
-		r.Header.Set(k, v)
-	}
-	r.Header.Set("Content-Type", contentTypeProto)
-
+func (c *client) newRequest(ctx context.Context, body []byte) (request, error) {
+	r := c.req.Clone(ctx)
 	req := request{Request: r}
-	switch Compression(d.cfg.Compression) {
+
+	switch c.compression {
 	case NoCompression:
 		r.ContentLength = (int64)(len(body))
 		req.bodyReader = bodyReader(body)
@@ -223,7 +252,7 @@ func (d *client) newRequest(body []byte) (request, error) {
 // bodyReader returns a closure returning a new reader for buf.
 func bodyReader(buf []byte) func() io.ReadCloser {
 	return func() io.ReadCloser {
-		return ioutil.NopCloser(bytes.NewReader(buf))
+		return io.NopCloser(bytes.NewReader(buf))
 	}
 }
 
@@ -250,8 +279,8 @@ type retryableError struct {
 // throttle delay contained in headers.
 func newResponseError(header http.Header) error {
 	var rErr retryableError
-	if s, ok := header["Retry-After"]; ok {
-		if t, err := strconv.ParseInt(s[0], 10, 64); err == nil {
+	if v := header.Get("Retry-After"); v != "" {
+		if t, err := strconv.ParseInt(v, 10, 64); err == nil {
 			rErr.throttle = t
 		}
 	}
@@ -275,27 +304,4 @@ func evaluate(err error) (bool, time.Duration) {
 	}
 
 	return true, time.Duration(rErr.throttle)
-}
-
-func (d *client) getScheme() string {
-	if d.cfg.Insecure {
-		return "http"
-	}
-	return "https"
-}
-
-func (d *client) contextWithStop(ctx context.Context) (context.Context, context.CancelFunc) {
-	// Unify the parent context Done signal with the client's stop
-	// channel.
-	ctx, cancel := context.WithCancel(ctx)
-	go func(ctx context.Context, cancel context.CancelFunc) {
-		select {
-		case <-ctx.Done():
-			// Nothing to do, either cancelled or deadline
-			// happened.
-		case <-d.stopCh:
-			cancel()
-		}
-	}(ctx, cancel)
-	return ctx, cancel
 }

@@ -23,8 +23,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.opentelemetry.io/otel/attribute"
-	ottest "go.opentelemetry.io/otel/internal/internaltest"
 	"go.opentelemetry.io/otel/sdk/internal/env"
+	ottest "go.opentelemetry.io/otel/sdk/internal/internaltest"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -168,6 +168,7 @@ func testSpanLimits(t *testing.T, limits SpanLimits) ReadOnlySpan {
 	span.SetAttributes(
 		attribute.String("string", "abc"),
 		attribute.StringSlice("stringSlice", []string{"abc", "def"}),
+		attribute.String("euro", "€"), // this is a 3-byte rune
 	)
 	span.AddEvent("event 1", trace.WithAttributes(a...))
 	span.AddEvent("event 2", trace.WithAttributes(a...))
@@ -186,24 +187,27 @@ func TestSpanLimits(t *testing.T) {
 		attrs := testSpanLimits(t, limits).Attributes()
 		assert.Contains(t, attrs, attribute.String("string", "abc"))
 		assert.Contains(t, attrs, attribute.StringSlice("stringSlice", []string{"abc", "def"}))
+		assert.Contains(t, attrs, attribute.String("euro", "€"))
 
 		limits.AttributeValueLengthLimit = 2
 		attrs = testSpanLimits(t, limits).Attributes()
 		// Ensure string and string slice attributes are truncated.
 		assert.Contains(t, attrs, attribute.String("string", "ab"))
 		assert.Contains(t, attrs, attribute.StringSlice("stringSlice", []string{"ab", "de"}))
+		assert.Contains(t, attrs, attribute.String("euro", ""))
 
 		limits.AttributeValueLengthLimit = 0
 		attrs = testSpanLimits(t, limits).Attributes()
 		assert.Contains(t, attrs, attribute.String("string", ""))
 		assert.Contains(t, attrs, attribute.StringSlice("stringSlice", []string{"", ""}))
+		assert.Contains(t, attrs, attribute.String("euro", ""))
 	})
 
 	t.Run("AttributeCountLimit", func(t *testing.T) {
 		limits := NewSpanLimits()
 		// Unlimited.
 		limits.AttributeCountLimit = -1
-		assert.Len(t, testSpanLimits(t, limits).Attributes(), 2)
+		assert.Len(t, testSpanLimits(t, limits).Attributes(), 3)
 
 		limits.AttributeCountLimit = 1
 		assert.Len(t, testSpanLimits(t, limits).Attributes(), 1)

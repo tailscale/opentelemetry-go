@@ -21,18 +21,18 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/internal/otlptracetest"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/otlpconfig"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/otlptracetest"
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
@@ -47,6 +47,7 @@ type mockCollector struct {
 	injectHTTPStatus     []int
 	injectResponseHeader []map[string]string
 	injectContentType    string
+	partial              *collectortracepb.ExportTracePartialSuccess
 	delay                <-chan struct{}
 
 	clientTLSConfig *tls.Config
@@ -94,7 +95,9 @@ func (c *mockCollector) serveTraces(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	response := collectortracepb.ExportTraceServiceResponse{}
+	response := collectortracepb.ExportTraceServiceResponse{
+		PartialSuccess: c.partial,
+	}
 	rawResponse, err := proto.Marshal(&response)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -168,7 +171,7 @@ func readRequest(r *http.Request) ([]byte, error) {
 	if r.Header.Get("Content-Encoding") == "gzip" {
 		return readGzipBody(r.Body)
 	}
-	return ioutil.ReadAll(r.Body)
+	return io.ReadAll(r.Body)
 }
 
 func readGzipBody(body io.Reader) ([]byte, error) {
@@ -208,6 +211,7 @@ type mockCollectorConfig struct {
 	InjectHTTPStatus     []int
 	InjectContentType    string
 	InjectResponseHeader []map[string]string
+	Partial              *collectortracepb.ExportTracePartialSuccess
 	Delay                <-chan struct{}
 	WithTLS              bool
 	ExpectedHeaders      map[string]string
@@ -231,13 +235,16 @@ func runMockCollector(t *testing.T, cfg mockCollectorConfig) *mockCollector {
 		injectHTTPStatus:     cfg.InjectHTTPStatus,
 		injectResponseHeader: cfg.InjectResponseHeader,
 		injectContentType:    cfg.InjectContentType,
+		partial:              cfg.Partial,
 		delay:                cfg.Delay,
 		expectedHeaders:      cfg.ExpectedHeaders,
 	}
 	mux := http.NewServeMux()
 	mux.Handle(cfg.TracesURLPath, http.HandlerFunc(m.serveTraces))
 	server := &http.Server{
-		Handler: mux,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
 	}
 	if cfg.WithTLS {
 		pem, err := generateWeakCertificate()

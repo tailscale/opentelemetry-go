@@ -18,10 +18,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,9 +30,11 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"go.opentelemetry.io/otel/exporters/otlp/internal"
-	"go.opentelemetry.io/otel/exporters/otlp/internal/retry"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/otlpconfig"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/retry"
 	coltracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
@@ -42,7 +43,7 @@ const contentTypeProto = "application/x-protobuf"
 
 var gzPool = sync.Pool{
 	New: func() interface{} {
-		w := gzip.NewWriter(ioutil.Discard)
+		w := gzip.NewWriter(io.Discard)
 		return w
 	},
 }
@@ -208,32 +209,63 @@ func (d *client) UploadTraces(ctx context.Context, protoSpans []*tracepb.Resourc
 
 		request.reset(ctx)
 		resp, err := d.client.Do(request.Request)
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && urlErr.Temporary() {
+			return newResponseError(http.Header{})
+		}
 		if err != nil {
 			return err
 		}
 
-		var rErr error
-		switch resp.StatusCode {
-		case http.StatusOK:
-			// Success, do not retry.
-		case http.StatusTooManyRequests,
-			http.StatusServiceUnavailable:
-			// Retry-able failure.
-			rErr = newResponseError(resp.Header)
+		if resp != nil && resp.Body != nil {
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					otel.Handle(err)
+				}
+			}()
+		}
 
-			// Going to retry, drain the body to reuse the connection.
-			if _, err := io.Copy(ioutil.Discard, resp.Body); err != nil {
-				_ = resp.Body.Close()
+		switch sc := resp.StatusCode; {
+		case sc >= 200 && sc <= 299:
+			// Success, do not retry.
+			// Read the partial success message, if any.
+			var respData bytes.Buffer
+			if _, err := io.Copy(&respData, resp.Body); err != nil {
 				return err
 			}
-		default:
-			rErr = fmt.Errorf("failed to send %s to %s: %s", d.name, request.URL, resp.Status)
-		}
+			if respData.Len() == 0 {
+				return nil
+			}
 
-		if err := resp.Body.Close(); err != nil {
-			return err
+			if resp.Header.Get("Content-Type") == "application/x-protobuf" {
+				var respProto coltracepb.ExportTraceServiceResponse
+				if err := proto.Unmarshal(respData.Bytes(), &respProto); err != nil {
+					return err
+				}
+
+				if respProto.PartialSuccess != nil {
+					msg := respProto.PartialSuccess.GetErrorMessage()
+					n := respProto.PartialSuccess.GetRejectedSpans()
+					if n != 0 || msg != "" {
+						err := internal.TracePartialSuccessError(n, msg)
+						otel.Handle(err)
+					}
+				}
+			}
+			return nil
+
+		case sc == http.StatusTooManyRequests,
+			sc == http.StatusBadGateway,
+			sc == http.StatusServiceUnavailable,
+			sc == http.StatusGatewayTimeout:
+			// Retry-able failures.  Drain the body to reuse the connection.
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				otel.Handle(err)
+			}
+			return newResponseError(resp.Header)
+		default:
+			return fmt.Errorf("failed to send to %s: %s", request.URL, resp.Status)
 		}
-		return rErr
 	})
 }
 
@@ -243,6 +275,9 @@ func (d *client) newRequest(body []byte) (request, error) {
 	if err != nil {
 		return request{Request: r}, err
 	}
+
+	userAgent := "OTel OTLP Exporter Go/" + otlptrace.Version()
+	r.Header.Set("User-Agent", userAgent)
 
 	for k, v := range d.cfg.Headers {
 		r.Header.Set(k, v)
@@ -295,7 +330,7 @@ func (d *client) MarshalLog() interface{} {
 // bodyReader returns a closure returning a new reader for buf.
 func bodyReader(buf []byte) func() io.ReadCloser {
 	return func() io.ReadCloser {
-		return ioutil.NopCloser(bytes.NewReader(buf))
+		return io.NopCloser(bytes.NewReader(buf))
 	}
 }
 

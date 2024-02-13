@@ -10,6 +10,15 @@ updates:
     schedule:
       interval: weekly
       day: sunday
+  - package-ecosystem: docker
+    directory: /example/zipkin
+    labels:
+      - dependencies
+      - docker
+      - Skip Changelog
+    schedule:
+      interval: weekly
+      day: sunday
   - package-ecosystem: gomod
     directory: /
     labels:
@@ -47,7 +56,7 @@ updates:
       interval: weekly
       day: sunday
   - package-ecosystem: gomod
-    directory: /example/fib
+    directory: /bridge/opentracing/test
     labels:
       - dependencies
       - go
@@ -56,7 +65,7 @@ updates:
       interval: weekly
       day: sunday
   - package-ecosystem: gomod
-    directory: /example/jaeger
+    directory: /example/dice
     labels:
       - dependencies
       - go
@@ -111,33 +120,6 @@ updates:
       day: sunday
   - package-ecosystem: gomod
     directory: /example/zipkin
-    labels:
-      - dependencies
-      - go
-      - Skip Changelog
-    schedule:
-      interval: weekly
-      day: sunday
-  - package-ecosystem: gomod
-    directory: /exporters/jaeger
-    labels:
-      - dependencies
-      - go
-      - Skip Changelog
-    schedule:
-      interval: weekly
-      day: sunday
-  - package-ecosystem: gomod
-    directory: /exporters/otlp/internal/retry
-    labels:
-      - dependencies
-      - go
-      - Skip Changelog
-    schedule:
-      interval: weekly
-      day: sunday
-  - package-ecosystem: gomod
-    directory: /exporters/otlp/otlpmetric
     labels:
       - dependencies
       - go
@@ -276,6 +258,15 @@ updates:
     labels:
       - dependencies
       - go
+      - Skip Changelog
+    schedule:
+      interval: weekly
+      day: sunday
+  - package-ecosystem: pip
+    directory: /
+    labels:
+      - dependencies
+      - python
       - Skip Changelog
     schedule:
       interval: weekly

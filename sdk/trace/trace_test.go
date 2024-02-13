@@ -33,10 +33,10 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	ottest "go.opentelemetry.io/otel/internal/internaltest"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
+	ottest "go.opentelemetry.io/otel/sdk/internal/internaltest"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -363,6 +363,16 @@ func TestStartSpanWithParent(t *testing.T) {
 	}
 }
 
+// Test we get a successful span as a new root if a nil context is sent in, as opposed to a panic.
+// See https://github.com/open-telemetry/opentelemetry-go/issues/3109
+func TestStartSpanWithNilContext(t *testing.T) {
+	tp := NewTracerProvider()
+	tr := tp.Tracer("NoPanic")
+
+	// nolint:staticcheck // no nil context, but that's the point of the test.
+	assert.NotPanics(t, func() { tr.Start(nil, "should-not-panic") })
+}
+
 func TestStartSpanNewRootNotSampled(t *testing.T) {
 	alwaysSampleTp := NewTracerProvider()
 	sampledTr := alwaysSampleTp.Tracer("AlwaysSampled")
@@ -617,14 +627,14 @@ func TestSpanSetAttributes(t *testing.T) {
 			roSpan := span.(ReadOnlySpan)
 
 			// Ensure the span itself is valid.
-			assert.ElementsMatch(t, test.wantAttrs, roSpan.Attributes(), "exected attributes")
+			assert.ElementsMatch(t, test.wantAttrs, roSpan.Attributes(), "expected attributes")
 			assert.Equal(t, test.wantDropped, roSpan.DroppedAttributes(), "dropped attributes")
 
 			snap, ok := te.GetSpan(spanName)
 			require.Truef(t, ok, "span %s not exported", spanName)
 
 			// Ensure the exported span snapshot is valid.
-			assert.ElementsMatch(t, test.wantAttrs, snap.Attributes(), "exected attributes")
+			assert.ElementsMatch(t, test.wantAttrs, snap.Attributes(), "expected attributes")
 			assert.Equal(t, test.wantDropped, snap.DroppedAttributes(), "dropped attributes")
 		})
 	}
@@ -1123,6 +1133,18 @@ func TestNilSpanEnd(t *testing.T) {
 	span.End()
 }
 
+func TestSpanWithCanceledContext(t *testing.T) {
+	te := NewTestExporter()
+	tp := NewTracerProvider(WithSyncer(te))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, span := tp.Tracer(t.Name()).Start(ctx, "span")
+	span.End()
+
+	assert.Equal(t, 1, te.Len(), "span recording must ignore context cancelation")
+}
+
 func TestNonRecordingSpanDoesNotTrackRuntimeTracerTask(t *testing.T) {
 	tp := NewTracerProvider(WithSampler(NeverSample()))
 	tr := tp.Tracer("TestNonRecordingSpanDoesNotTrackRuntimeTracerTask")
@@ -1188,7 +1210,7 @@ func TestRecordError(t *testing.T) {
 	}{
 		{
 			err: ottest.NewTestError("test error"),
-			typ: "go.opentelemetry.io/otel/internal/internaltest.TestError",
+			typ: "go.opentelemetry.io/otel/sdk/internal/internaltest.TestError",
 			msg: "test error",
 		},
 		{
@@ -1225,8 +1247,8 @@ func TestRecordError(t *testing.T) {
 					Name: semconv.ExceptionEventName,
 					Time: errTime,
 					Attributes: []attribute.KeyValue{
-						semconv.ExceptionTypeKey.String(s.typ),
-						semconv.ExceptionMessageKey.String(s.msg),
+						semconv.ExceptionType(s.typ),
+						semconv.ExceptionMessage(s.msg),
 					},
 				},
 			},
@@ -1240,7 +1262,7 @@ func TestRecordError(t *testing.T) {
 
 func TestRecordErrorWithStackTrace(t *testing.T) {
 	err := ottest.NewTestError("test error")
-	typ := "go.opentelemetry.io/otel/internal/internaltest.TestError"
+	typ := "go.opentelemetry.io/otel/sdk/internal/internaltest.TestError"
 	msg := "test error"
 
 	te := NewTestExporter()
@@ -1269,8 +1291,8 @@ func TestRecordErrorWithStackTrace(t *testing.T) {
 				Name: semconv.ExceptionEventName,
 				Time: errTime,
 				Attributes: []attribute.KeyValue{
-					semconv.ExceptionTypeKey.String(typ),
-					semconv.ExceptionMessageKey.String(msg),
+					semconv.ExceptionType(typ),
+					semconv.ExceptionMessage(msg),
 				},
 			},
 		},
@@ -1397,7 +1419,8 @@ func TestWithResource(t *testing.T) {
 			name: "last resource wins",
 			options: []TracerProviderOption{
 				WithResource(resource.NewSchemaless(attribute.String("rk1", "vk1"), attribute.Int64("rk2", 5))),
-				WithResource(resource.NewSchemaless(attribute.String("rk3", "rv3"), attribute.Int64("rk4", 10)))},
+				WithResource(resource.NewSchemaless(attribute.String("rk3", "rv3"), attribute.Int64("rk4", 10))),
+			},
 			want: mergeResource(t, resource.Environment(), resource.NewSchemaless(attribute.String("rk3", "rv3"), attribute.Int64("rk4", 10))),
 		},
 		{
@@ -1492,8 +1515,8 @@ func TestSpanCapturesPanic(t *testing.T) {
 	require.Len(t, spans[0].Events(), 1)
 	assert.Equal(t, spans[0].Events()[0].Name, semconv.ExceptionEventName)
 	assert.Equal(t, spans[0].Events()[0].Attributes, []attribute.KeyValue{
-		semconv.ExceptionTypeKey.String("*errors.errorString"),
-		semconv.ExceptionMessageKey.String("error message"),
+		semconv.ExceptionType("*errors.errorString"),
+		semconv.ExceptionMessage("error message"),
 	})
 }
 

@@ -21,17 +21,18 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	ottest "go.opentelemetry.io/otel/internal/internaltest"
+	"go.opentelemetry.io/otel/sdk"
+	ottest "go.opentelemetry.io/otel/sdk/internal/internaltest"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
 var (
@@ -182,7 +183,7 @@ func TestMerge(t *testing.T) {
 			name:  "Merge with different schemas",
 			a:     resource.NewWithAttributes("https://opentelemetry.io/schemas/1.4.0", kv41),
 			b:     resource.NewWithAttributes("https://opentelemetry.io/schemas/1.3.0", kv42),
-			want:  nil,
+			want:  []attribute.KeyValue{kv42},
 			isErr: true,
 		},
 	}
@@ -227,8 +228,8 @@ func TestDefault(t *testing.T) {
 		"default service.name should include executable name")
 
 	require.Contains(t, res.Attributes(), semconv.TelemetrySDKLanguageGo)
-	require.Contains(t, res.Attributes(), semconv.TelemetrySDKVersionKey.String(otel.Version()))
-	require.Contains(t, res.Attributes(), semconv.TelemetrySDKNameKey.String("opentelemetry"))
+	require.Contains(t, res.Attributes(), semconv.TelemetrySDKVersion(sdk.Version()))
+	require.Contains(t, res.Attributes(), semconv.TelemetrySDKName("opentelemetry"))
 }
 
 func TestString(t *testing.T) {
@@ -323,7 +324,7 @@ func TestNew(t *testing.T) {
 
 		resourceValues map[string]string
 		schemaURL      string
-		isErr          bool
+		wantErr        error
 	}{
 		{
 			name:           "No Options returns empty resource",
@@ -370,7 +371,7 @@ func TestNew(t *testing.T) {
 			resourceValues: map[string]string{
 				"telemetry.sdk.name":     "opentelemetry",
 				"telemetry.sdk.language": "go",
-				"telemetry.sdk.version":  otel.Version(),
+				"telemetry.sdk.version":  sdk.Version(),
 			},
 			schemaURL: semconv.SchemaURL,
 		},
@@ -405,9 +406,14 @@ func TestNew(t *testing.T) {
 				),
 				resource.WithSchemaURL("https://opentelemetry.io/schemas/1.1.0"),
 			},
-			resourceValues: map[string]string{},
-			schemaURL:      "",
-			isErr:          true,
+			resourceValues: map[string]string{
+				string(semconv.HostNameKey): func() (hostname string) {
+					hostname, _ = os.Hostname()
+					return hostname
+				}(),
+			},
+			schemaURL: "",
+			wantErr:   resource.ErrSchemaURLConflict,
 		},
 		{
 			name:   "With conflicting detector schema urls",
@@ -419,9 +425,14 @@ func TestNew(t *testing.T) {
 				),
 				resource.WithSchemaURL("https://opentelemetry.io/schemas/1.2.0"),
 			},
-			resourceValues: map[string]string{},
-			schemaURL:      "",
-			isErr:          true,
+			resourceValues: map[string]string{
+				string(semconv.HostNameKey): func() (hostname string) {
+					hostname, _ = os.Hostname()
+					return hostname
+				}(),
+			},
+			schemaURL: "",
+			wantErr:   resource.ErrSchemaURLConflict,
 		},
 	}
 	for _, tt := range tc {
@@ -435,10 +446,10 @@ func TestNew(t *testing.T) {
 			ctx := context.Background()
 			res, err := resource.New(ctx, tt.options...)
 
-			if tt.isErr {
-				require.Error(t, err)
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
 			} else {
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}
 
 			require.EqualValues(t, tt.resourceValues, toMap(res))
@@ -450,6 +461,55 @@ func TestNew(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewWrapedError(t *testing.T) {
+	localErr := errors.New("local error")
+	_, err := resource.New(
+		context.Background(),
+		resource.WithDetectors(
+			resource.StringDetector("", "", func() (string, error) {
+				return "", localErr
+			}),
+			resource.StringDetector("", "", func() (string, error) {
+				return "", assert.AnError
+			}),
+		),
+	)
+
+	assert.ErrorIs(t, err, localErr)
+	assert.ErrorIs(t, err, assert.AnError)
+	assert.NotErrorIs(t, err, errors.New("false positive error"))
+}
+
+func TestWithHostID(t *testing.T) {
+	mockHostIDProvider()
+	t.Cleanup(restoreHostIDProvider)
+
+	ctx := context.Background()
+
+	res, err := resource.New(ctx,
+		resource.WithHostID(),
+	)
+
+	require.NoError(t, err)
+	require.EqualValues(t, map[string]string{
+		"host.id": "f2c668b579780554f70f72a063dc0864",
+	}, toMap(res))
+}
+
+func TestWithHostIDError(t *testing.T) {
+	mockHostIDProviderWithError()
+	t.Cleanup(restoreHostIDProvider)
+
+	ctx := context.Background()
+
+	res, err := resource.New(ctx,
+		resource.WithHostID(),
+	)
+
+	assert.ErrorIs(t, err, assert.AnError)
+	require.EqualValues(t, map[string]string{}, toMap(res))
 }
 
 func TestWithOSType(t *testing.T) {
@@ -720,3 +780,29 @@ func TestWithContainer(t *testing.T) {
 		string(semconv.ContainerIDKey): fakeContainerID,
 	}, toMap(res))
 }
+
+func TestResourceConcurrentSafe(t *testing.T) {
+	// Creating Resources should also be free of any data races,
+	// because Resources are immutable.
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d := &fakeDetector{}
+			_, err := resource.Detect(context.Background(), d)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+}
+
+type fakeDetector struct{}
+
+func (f fakeDetector) Detect(_ context.Context) (*resource.Resource, error) {
+	// A bit pedantic, but resource.NewWithAttributes returns an empty Resource when
+	// no attributes specified. We want to make sure that this is concurrent-safe.
+	return resource.NewWithAttributes("https://opentelemetry.io/schemas/1.3.0"), nil
+}
+
+var _ resource.Detector = &fakeDetector{}

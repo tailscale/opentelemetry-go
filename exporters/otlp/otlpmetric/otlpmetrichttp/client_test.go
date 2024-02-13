@@ -12,260 +12,230 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package otlpmetrichttp_test
+package otlpmetrichttp
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
 	"net/http"
-	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/internal/otlpmetrictest"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp/internal/oconf"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp/internal/otest"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	mpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
-const (
-	relOtherMetricsPath = "post/metrics/here"
-	otherMetricsPath    = "/post/metrics/here"
-)
-
-var (
-	oneRecord = otlpmetrictest.OneRecordReader()
-
-	testResource = resource.Empty()
-)
-
-var (
-	testHeaders = map[string]string{
-		"Otel-Go-Key-1": "somevalue",
-		"Otel-Go-Key-2": "someothervalue",
-	}
-)
-
-func TestEndToEnd(t *testing.T) {
-	tests := []struct {
-		name  string
-		opts  []otlpmetrichttp.Option
-		mcCfg mockCollectorConfig
-		tls   bool
-	}{
-		{
-			name: "no extra options",
-			opts: nil,
-		},
-		{
-			name: "with gzip compression",
-			opts: []otlpmetrichttp.Option{
-				otlpmetrichttp.WithCompression(otlpmetrichttp.GzipCompression),
-			},
-		},
-		{
-			name: "with empty paths (forced to defaults)",
-			opts: []otlpmetrichttp.Option{
-				otlpmetrichttp.WithURLPath(""),
-			},
-		},
-		{
-			name: "with relative paths",
-			opts: []otlpmetrichttp.Option{
-				otlpmetrichttp.WithURLPath(relOtherMetricsPath),
-			},
-			mcCfg: mockCollectorConfig{
-				MetricsURLPath: otherMetricsPath,
-			},
-		},
-		{
-			name: "with TLS",
-			opts: nil,
-			mcCfg: mockCollectorConfig{
-				WithTLS: true,
-			},
-			tls: true,
-		},
-		{
-			name: "with extra headers",
-			opts: []otlpmetrichttp.Option{
-				otlpmetrichttp.WithHeaders(testHeaders),
-			},
-			mcCfg: mockCollectorConfig{
-				ExpectedHeaders: testHeaders,
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			mc := runMockCollector(t, tc.mcCfg)
-			defer mc.MustStop(t)
-			allOpts := []otlpmetrichttp.Option{
-				otlpmetrichttp.WithEndpoint(mc.Endpoint()),
-			}
-			if tc.tls {
-				tlsConfig := mc.ClientTLSConfig()
-				require.NotNil(t, tlsConfig)
-				allOpts = append(allOpts, otlpmetrichttp.WithTLSClientConfig(tlsConfig))
-			} else {
-				allOpts = append(allOpts, otlpmetrichttp.WithInsecure())
-			}
-			allOpts = append(allOpts, tc.opts...)
-			client := otlpmetrichttp.NewClient(allOpts...)
-			ctx := context.Background()
-			exporter, err := otlpmetric.New(ctx, client)
-			if assert.NoError(t, err) {
-				defer func() {
-					assert.NoError(t, exporter.Shutdown(ctx))
-				}()
-				otlpmetrictest.RunEndToEndTest(ctx, t, exporter, mc)
-			}
-		})
-	}
+type clientShim struct {
+	*client
 }
 
-func TestExporterShutdown(t *testing.T) {
-	mc := runMockCollector(t, mockCollectorConfig{})
-	defer func() {
-		_ = mc.Stop()
-	}()
-
-	<-time.After(5 * time.Millisecond)
-
-	otlpmetrictest.RunExporterShutdownTest(t, func() otlpmetric.Client {
-		return otlpmetrichttp.NewClient(
-			otlpmetrichttp.WithInsecure(),
-			otlpmetrichttp.WithEndpoint(mc.endpoint),
-		)
-	})
+func (clientShim) Temporality(metric.InstrumentKind) metricdata.Temporality {
+	return metricdata.CumulativeTemporality
 }
 
-func TestTimeout(t *testing.T) {
-	delay := make(chan struct{})
-	mcCfg := mockCollectorConfig{Delay: delay}
-	mc := runMockCollector(t, mcCfg)
-	defer mc.MustStop(t)
-	defer func() { close(delay) }()
-	client := otlpmetrichttp.NewClient(
-		otlpmetrichttp.WithEndpoint(mc.Endpoint()),
-		otlpmetrichttp.WithInsecure(),
-		otlpmetrichttp.WithTimeout(time.Nanosecond),
-	)
+func (clientShim) Aggregation(metric.InstrumentKind) metric.Aggregation {
+	return nil
+}
+
+func (clientShim) ForceFlush(ctx context.Context) error {
+	return ctx.Err()
+}
+
+func TestClient(t *testing.T) {
+	factory := func(rCh <-chan otest.ExportResult) (otest.Client, otest.Collector) {
+		coll, err := otest.NewHTTPCollector("", rCh)
+		require.NoError(t, err)
+
+		addr := coll.Addr().String()
+		opts := []Option{WithEndpoint(addr), WithInsecure()}
+		cfg := oconf.NewHTTPConfig(asHTTPOptions(opts)...)
+		client, err := newClient(cfg)
+		require.NoError(t, err)
+		return clientShim{client}, coll
+	}
+
+	t.Run("Integration", otest.RunClientTests(factory))
+}
+
+func TestClientWithHTTPCollectorRespondingPlainText(t *testing.T) {
 	ctx := context.Background()
-	exporter, err := otlpmetric.New(ctx, client)
+	coll, err := otest.NewHTTPCollector("", nil, otest.WithHTTPCollectorRespondingPlainText())
 	require.NoError(t, err)
-	defer func() {
-		assert.NoError(t, exporter.Shutdown(ctx))
-	}()
-	err = exporter.Export(ctx, testResource, oneRecord)
-	assert.Equalf(t, true, os.IsTimeout(err), "expected timeout error, got: %v", err)
+
+	addr := coll.Addr().String()
+	opts := []Option{WithEndpoint(addr), WithInsecure()}
+	cfg := oconf.NewHTTPConfig(asHTTPOptions(opts)...)
+	client, err := newClient(cfg)
+	require.NoError(t, err)
+
+	require.NoError(t, client.UploadMetrics(ctx, &mpb.ResourceMetrics{}))
+	require.NoError(t, client.Shutdown(ctx))
+	got := coll.Collect().Dump()
+	require.Len(t, got, 1, "upload of one ResourceMetrics")
 }
 
-func TestEmptyData(t *testing.T) {
-	mcCfg := mockCollectorConfig{}
-	mc := runMockCollector(t, mcCfg)
-	defer mc.MustStop(t)
-	driver := otlpmetrichttp.NewClient(
-		otlpmetrichttp.WithEndpoint(mc.Endpoint()),
-		otlpmetrichttp.WithInsecure(),
-	)
+func TestNewWithInvalidEndpoint(t *testing.T) {
 	ctx := context.Background()
-	exporter, err := otlpmetric.New(ctx, driver)
-	require.NoError(t, err)
-	defer func() {
-		assert.NoError(t, exporter.Shutdown(ctx))
-	}()
-	assert.NoError(t, err)
-	err = exporter.Export(ctx, testResource, oneRecord)
-	assert.NoError(t, err)
-	assert.NotEmpty(t, mc.GetMetrics())
-}
-
-func TestCancelledContext(t *testing.T) {
-	statuses := []int{
-		http.StatusBadRequest,
-	}
-	mcCfg := mockCollectorConfig{
-		InjectHTTPStatus: statuses,
-	}
-	mc := runMockCollector(t, mcCfg)
-	defer mc.MustStop(t)
-	driver := otlpmetrichttp.NewClient(
-		otlpmetrichttp.WithEndpoint(mc.Endpoint()),
-		otlpmetrichttp.WithInsecure(),
-	)
-	ctx, cancel := context.WithCancel(context.Background())
-	exporter, err := otlpmetric.New(ctx, driver)
-	require.NoError(t, err)
-	defer func() {
-		assert.NoError(t, exporter.Shutdown(context.Background()))
-	}()
-	cancel()
-	_ = exporter.Export(ctx, testResource, oneRecord)
-	assert.Empty(t, mc.GetMetrics())
-}
-
-func TestDeadlineContext(t *testing.T) {
-	statuses := make([]int, 0, 5)
-	for i := 0; i < cap(statuses); i++ {
-		statuses = append(statuses, http.StatusTooManyRequests)
-	}
-	mcCfg := mockCollectorConfig{
-		InjectHTTPStatus: statuses,
-	}
-	mc := runMockCollector(t, mcCfg)
-	defer mc.MustStop(t)
-	driver := otlpmetrichttp.NewClient(
-		otlpmetrichttp.WithEndpoint(mc.Endpoint()),
-		otlpmetrichttp.WithInsecure(),
-		otlpmetrichttp.WithBackoff(time.Minute),
-	)
-	ctx := context.Background()
-	exporter, err := otlpmetric.New(ctx, driver)
-	require.NoError(t, err)
-	defer func() {
-		assert.NoError(t, exporter.Shutdown(context.Background()))
-	}()
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	err = exporter.Export(ctx, testResource, oneRecord)
+	exp, err := New(ctx, WithEndpoint("host:invalid-port"))
 	assert.Error(t, err)
-	assert.Empty(t, mc.GetMetrics())
+	assert.Nil(t, exp)
 }
 
-func TestStopWhileExporting(t *testing.T) {
-	statuses := make([]int, 0, 5)
-	for i := 0; i < cap(statuses); i++ {
-		statuses = append(statuses, http.StatusTooManyRequests)
+func TestConfig(t *testing.T) {
+	factoryFunc := func(ePt string, rCh <-chan otest.ExportResult, o ...Option) (metric.Exporter, *otest.HTTPCollector) {
+		coll, err := otest.NewHTTPCollector(ePt, rCh)
+		require.NoError(t, err)
+
+		opts := []Option{WithEndpoint(coll.Addr().String())}
+		if !strings.HasPrefix(strings.ToLower(ePt), "https") {
+			opts = append(opts, WithInsecure())
+		}
+		opts = append(opts, o...)
+
+		ctx := context.Background()
+		exp, err := New(ctx, opts...)
+		require.NoError(t, err)
+		return exp, coll
 	}
-	mcCfg := mockCollectorConfig{
-		InjectHTTPStatus: statuses,
-	}
-	mc := runMockCollector(t, mcCfg)
-	defer mc.MustStop(t)
-	driver := otlpmetrichttp.NewClient(
-		otlpmetrichttp.WithEndpoint(mc.Endpoint()),
-		otlpmetrichttp.WithInsecure(),
-		otlpmetrichttp.WithBackoff(time.Minute),
-	)
-	ctx := context.Background()
-	exporter, err := otlpmetric.New(ctx, driver)
-	require.NoError(t, err)
-	defer func() {
-		assert.NoError(t, exporter.Shutdown(ctx))
-	}()
-	doneCh := make(chan struct{})
-	go func() {
-		err := exporter.Export(ctx, testResource, oneRecord)
-		assert.Error(t, err)
-		assert.Empty(t, mc.GetMetrics())
-		close(doneCh)
-	}()
-	<-time.After(time.Second)
-	err = exporter.Shutdown(ctx)
-	assert.NoError(t, err)
-	<-doneCh
+
+	t.Run("WithEndpointURL", func(t *testing.T) {
+		coll, err := otest.NewHTTPCollector("", nil)
+		require.NoError(t, err)
+		ctx := context.Background()
+
+		exp, err := New(ctx, WithEndpointURL("http://"+coll.Addr().String()))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, coll.Shutdown(ctx)) })
+		t.Cleanup(func() { require.NoError(t, exp.Shutdown(ctx)) })
+
+		assert.NoError(t, exp.Export(ctx, &metricdata.ResourceMetrics{}))
+		assert.Len(t, coll.Collect().Dump(), 1)
+	})
+
+	t.Run("WithHeaders", func(t *testing.T) {
+		key := http.CanonicalHeaderKey("my-custom-header")
+		headers := map[string]string{key: "custom-value"}
+		exp, coll := factoryFunc("", nil, WithHeaders(headers))
+		ctx := context.Background()
+		t.Cleanup(func() { require.NoError(t, coll.Shutdown(ctx)) })
+		require.NoError(t, exp.Export(ctx, &metricdata.ResourceMetrics{}))
+		// Ensure everything is flushed.
+		require.NoError(t, exp.Shutdown(ctx))
+
+		got := coll.Headers()
+		require.Regexp(t, "OTel Go OTLP over HTTP/protobuf metrics exporter/[01]\\..*", got)
+		require.Contains(t, got, key)
+		assert.Equal(t, got[key], []string{headers[key]})
+	})
+
+	t.Run("WithTimeout", func(t *testing.T) {
+		// Do not send on rCh so the Collector never responds to the client.
+		rCh := make(chan otest.ExportResult)
+		exp, coll := factoryFunc(
+			"",
+			rCh,
+			WithTimeout(time.Millisecond),
+			WithRetry(RetryConfig{Enabled: false}),
+		)
+		ctx := context.Background()
+		t.Cleanup(func() { require.NoError(t, coll.Shutdown(ctx)) })
+		// Push this after Shutdown so the HTTP server doesn't hang.
+		t.Cleanup(func() { close(rCh) })
+		t.Cleanup(func() { require.NoError(t, exp.Shutdown(ctx)) })
+		err := exp.Export(ctx, &metricdata.ResourceMetrics{})
+		assert.ErrorAs(t, err, new(retryableError))
+	})
+
+	t.Run("WithCompressionGZip", func(t *testing.T) {
+		exp, coll := factoryFunc("", nil, WithCompression(GzipCompression))
+		ctx := context.Background()
+		t.Cleanup(func() { require.NoError(t, coll.Shutdown(ctx)) })
+		t.Cleanup(func() { require.NoError(t, exp.Shutdown(ctx)) })
+		assert.NoError(t, exp.Export(ctx, &metricdata.ResourceMetrics{}))
+		assert.Len(t, coll.Collect().Dump(), 1)
+	})
+
+	t.Run("WithRetry", func(t *testing.T) {
+		emptyErr := errors.New("")
+		rCh := make(chan otest.ExportResult, 5)
+		header := http.Header{http.CanonicalHeaderKey("Retry-After"): {"10"}}
+		// All retryable errors.
+		rCh <- otest.ExportResult{Err: &otest.HTTPResponseError{
+			Status: http.StatusServiceUnavailable,
+			Err:    emptyErr,
+			Header: header,
+		}}
+		rCh <- otest.ExportResult{Err: &otest.HTTPResponseError{
+			Status: http.StatusTooManyRequests,
+			Err:    emptyErr,
+		}}
+		rCh <- otest.ExportResult{Err: &otest.HTTPResponseError{
+			Status: http.StatusGatewayTimeout,
+			Err:    emptyErr,
+		}}
+		rCh <- otest.ExportResult{Err: &otest.HTTPResponseError{
+			Status: http.StatusBadGateway,
+			Err:    emptyErr,
+		}}
+		rCh <- otest.ExportResult{}
+		exp, coll := factoryFunc("", rCh, WithRetry(RetryConfig{
+			Enabled:         true,
+			InitialInterval: time.Nanosecond,
+			MaxInterval:     time.Millisecond,
+			MaxElapsedTime:  time.Minute,
+		}))
+		ctx := context.Background()
+		t.Cleanup(func() { require.NoError(t, coll.Shutdown(ctx)) })
+		// Push this after Shutdown so the HTTP server doesn't hang.
+		t.Cleanup(func() { close(rCh) })
+		t.Cleanup(func() { require.NoError(t, exp.Shutdown(ctx)) })
+		assert.NoError(t, exp.Export(ctx, &metricdata.ResourceMetrics{}), "failed retry")
+		assert.Len(t, rCh, 0, "failed HTTP responses did not occur")
+	})
+
+	t.Run("WithURLPath", func(t *testing.T) {
+		path := "/prefix/v2/metrics"
+		ePt := fmt.Sprintf("http://localhost:0%s", path)
+		exp, coll := factoryFunc(ePt, nil, WithURLPath(path))
+		ctx := context.Background()
+		t.Cleanup(func() { require.NoError(t, coll.Shutdown(ctx)) })
+		t.Cleanup(func() { require.NoError(t, exp.Shutdown(ctx)) })
+		assert.NoError(t, exp.Export(ctx, &metricdata.ResourceMetrics{}))
+		assert.Len(t, coll.Collect().Dump(), 1)
+	})
+
+	t.Run("WithTLSClientConfig", func(t *testing.T) {
+		ePt := "https://localhost:0"
+		tlsCfg := &tls.Config{InsecureSkipVerify: true}
+		exp, coll := factoryFunc(ePt, nil, WithTLSClientConfig(tlsCfg))
+		ctx := context.Background()
+		t.Cleanup(func() { require.NoError(t, coll.Shutdown(ctx)) })
+		t.Cleanup(func() { require.NoError(t, exp.Shutdown(ctx)) })
+		assert.NoError(t, exp.Export(ctx, &metricdata.ResourceMetrics{}))
+		assert.Len(t, coll.Collect().Dump(), 1)
+	})
+
+	t.Run("WithCustomUserAgent", func(t *testing.T) {
+		key := http.CanonicalHeaderKey("user-agent")
+		headers := map[string]string{key: "custom-user-agent"}
+		exp, coll := factoryFunc("", nil, WithHeaders(headers))
+		ctx := context.Background()
+		t.Cleanup(func() { require.NoError(t, coll.Shutdown(ctx)) })
+		require.NoError(t, exp.Export(ctx, &metricdata.ResourceMetrics{}))
+		// Ensure everything is flushed.
+		require.NoError(t, exp.Shutdown(ctx))
+
+		got := coll.Headers()
+		require.Contains(t, got, key)
+		assert.Equal(t, got[key], []string{headers[key]})
+	})
 }

@@ -19,12 +19,21 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 type nonComparableTracerProvider struct {
 	trace.TracerProvider
+
+	nonComparable func() //nolint:structcheck,unused  // This is not called.
+}
+
+type nonComparableMeterProvider struct {
+	metric.MeterProvider
 
 	nonComparable func() //nolint:structcheck,unused  // This is not called.
 }
@@ -47,7 +56,7 @@ func TestSetTracerProvider(t *testing.T) {
 	t.Run("First Set() should replace the delegate", func(t *testing.T) {
 		ResetForTest(t)
 
-		SetTracerProvider(trace.NewNoopTracerProvider())
+		SetTracerProvider(tracenoop.NewTracerProvider())
 
 		_, ok := TracerProvider().(*tracerProvider)
 		if ok {
@@ -59,7 +68,7 @@ func TestSetTracerProvider(t *testing.T) {
 		ResetForTest(t)
 
 		tp := TracerProvider()
-		SetTracerProvider(trace.NewNoopTracerProvider())
+		SetTracerProvider(tracenoop.NewTracerProvider())
 
 		ntp := tp.(*tracerProvider)
 
@@ -123,5 +132,55 @@ func TestSetTextMapPropagator(t *testing.T) {
 		prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{})
 		SetTextMapPropagator(prop)
 		assert.NotPanics(t, func() { SetTextMapPropagator(prop) })
+	})
+}
+
+func TestSetMeterProvider(t *testing.T) {
+	t.Run("Set With default is a noop", func(t *testing.T) {
+		ResetForTest(t)
+
+		SetMeterProvider(MeterProvider())
+
+		mp, ok := MeterProvider().(*meterProvider)
+		if !ok {
+			t.Fatal("Global MeterProvider should be the default meter provider")
+		}
+
+		if mp.delegate != nil {
+			t.Fatal("meter provider should not delegate when setting itself")
+		}
+	})
+
+	t.Run("First Set() should replace the delegate", func(t *testing.T) {
+		ResetForTest(t)
+
+		SetMeterProvider(metricnoop.NewMeterProvider())
+
+		_, ok := MeterProvider().(*meterProvider)
+		if ok {
+			t.Fatal("Global MeterProvider was not changed")
+		}
+	})
+
+	t.Run("Set() should delegate existing Meter Providers", func(t *testing.T) {
+		ResetForTest(t)
+
+		mp := MeterProvider()
+
+		SetMeterProvider(metricnoop.NewMeterProvider())
+
+		dmp := mp.(*meterProvider)
+
+		if dmp.delegate == nil {
+			t.Fatal("The delegated meter providers should have a delegate")
+		}
+	})
+
+	t.Run("non-comparable types should not panic", func(t *testing.T) {
+		ResetForTest(t)
+
+		mp := nonComparableMeterProvider{}
+		SetMeterProvider(mp)
+		assert.NotPanics(t, func() { SetMeterProvider(mp) })
 	})
 }
