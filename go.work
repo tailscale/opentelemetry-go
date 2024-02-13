@@ -1,4 +1,4 @@
-go 1.22.0
+go 1.22
 
 replace go.opentelemetry.io/proto/otlp => github.com/tailscale/opentelemetry-proto-go/otlp v1.1.0-ts-fix
 
