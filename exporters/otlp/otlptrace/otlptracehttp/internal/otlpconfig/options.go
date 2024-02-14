@@ -197,7 +197,6 @@ func WithTLSClientConfig(tlsCfg *tls.Config) GenericOption {
 		cfg.Traces.TLSCfg = tlsCfg.Clone()
 		return cfg
 	})
-
 }
 
 func WithInsecure() GenericOption {

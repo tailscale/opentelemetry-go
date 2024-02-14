@@ -211,9 +211,7 @@ func TestConfigs(t *testing.T) {
 		{
 			name: "Test Default Certificate",
 			asserts: func(t *testing.T, c *Config) {
-
 				assert.Nil(t, c.Metrics.TLSCfg)
-
 			},
 		},
 		{
@@ -250,10 +248,8 @@ func TestConfigs(t *testing.T) {
 				"invalid_cert": []byte("invalid certificate file."),
 			},
 			asserts: func(t *testing.T, c *Config) {
-
 				// nolint:staticcheck // ignoring tlsCert.RootCAs.Subjects is deprecated ERR because cert does not come from SystemCertPool.
 				assert.Equal(t, tlsCert.RootCAs.Subjects(), c.Metrics.TLSCfg.RootCAs.Subjects())
-
 			},
 		},
 		{
@@ -439,7 +435,6 @@ func TestConfigs(t *testing.T) {
 			// Tests Generic options as HTTP Options
 			cfg := NewHTTPConfig(asHTTPOptions(tt.opts)...)
 			tt.asserts(t, &cfg)
-
 		})
 	}
 }

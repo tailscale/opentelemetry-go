@@ -79,7 +79,6 @@ func TestConfigs(t *testing.T) {
 		{
 			name: "Test default configs",
 			asserts: func(t *testing.T, c *Config) {
-
 				assert.Equal(t, "localhost:4318", c.Traces.Endpoint)
 
 				assert.Equal(t, NoCompression, c.Traces.Compression)
@@ -153,7 +152,6 @@ func TestConfigs(t *testing.T) {
 				assert.Equal(t, "env.traces.endpoint", c.Traces.Endpoint)
 
 				assert.Equal(t, "/", c.Traces.URLPath)
-
 			},
 		},
 		{
@@ -215,7 +213,6 @@ func TestConfigs(t *testing.T) {
 			name: "Test Default Certificate",
 			asserts: func(t *testing.T, c *Config) {
 				assert.Nil(t, c.Traces.TLSCfg)
-
 			},
 		},
 		{
@@ -224,10 +221,8 @@ func TestConfigs(t *testing.T) {
 				WithTLSClientConfig(tlsCert),
 			},
 			asserts: func(t *testing.T, c *Config) {
-
 				// nolint:staticcheck // ignoring tlsCert.RootCAs.Subjects is deprecated ERR because cert does not come from SystemCertPool.
 				assert.Equal(t, tlsCert.RootCAs.Subjects(), c.Traces.TLSCfg.RootCAs.Subjects())
-
 			},
 		},
 		{
@@ -407,7 +402,6 @@ func TestConfigs(t *testing.T) {
 			// Tests Generic options as HTTP Options
 			cfg := NewHTTPConfig(asHTTPOptions(tt.opts)...)
 			tt.asserts(t, &cfg)
-
 		})
 	}
 }
