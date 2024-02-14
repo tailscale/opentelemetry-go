@@ -2,11 +2,11 @@ name: Benchmark
 on:
   push:
     tags:
-      - v1.* 
-  workflow_dispatch: 
+      - v1.*
+  workflow_dispatch:
 
 env:
-  DEFAULT_GO_VERSION: "~1.21.3"
+  DEFAULT_GO_VERSION: "~1.22"
 jobs:
   benchmark:
     name: Benchmarks
@@ -30,7 +30,7 @@ jobs:
         uses: benchmark-action/github-action-benchmark@v1.19.3
         with:
           name: Benchmarks
-          tool: 'go'
+          tool: "go"
           output-file-path: output.txt
           external-data-json-path: ./benchmarks/data.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
