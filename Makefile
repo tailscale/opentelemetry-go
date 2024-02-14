@@ -26,7 +26,7 @@ TIMEOUT = 60
 
 .PHONY: precommit ci
 precommit: generate dependabot-generate license-check misspell go-mod-tidy golangci-lint-fix test-default
-ci: generate dependabot-check license-check lint vanity-import-check build test-default check-clean-work-tree test-coverage
+ci: generate dependabot-check license-check lint vanity-import-check build test-default check-clean-work-tree
 
 # Tools
 
@@ -175,22 +175,6 @@ test/%:
 		| grep -v third_party \
 		| xargs $(GO) test -timeout $(TIMEOUT)s $(ARGS)
 
-COVERAGE_MODE    = atomic
-COVERAGE_PROFILE = coverage.out
-.PHONY: test-coverage
-test-coverage: | $(GOCOVMERGE)
-	@set -e; \
-	printf "" > coverage.txt; \
-	for dir in $(ALL_COVERAGE_MOD_DIRS); do \
-	  echo "$(GO) test -coverpkg=go.opentelemetry.io/otel/... -covermode=$(COVERAGE_MODE) -coverprofile="$(COVERAGE_PROFILE)" $${dir}/..."; \
-	  (cd "$${dir}" && \
-	    $(GO) list ./... \
-	    | grep -v third_party \
-	    | grep -v 'semconv/v.*' \
-	    | xargs $(GO) test -coverpkg=./... -covermode=$(COVERAGE_MODE) -coverprofile="$(COVERAGE_PROFILE)" && \
-	  $(GO) tool cover -html=coverage.out -o coverage.html); \
-	done; \
-	$(GOCOVMERGE) $$(find . -name coverage.out) > coverage.txt
 
 # Adding a directory will include all benchmarks in that direcotry if a filter is not specified.
 BENCHMARK_TARGETS := sdk/trace
@@ -225,7 +209,7 @@ go-mod-tidy/%: DIR=$*
 go-mod-tidy/%: | crosslink
 	@echo "$(GO) mod tidy in $(DIR)" \
 		&& cd $(DIR) \
-		&& $(GO) mod tidy -compat=1.20
+		&& $(GO) mod tidy -compat=1.22
 
 .PHONY: lint-modules
 lint-modules: go-mod-tidy
@@ -314,5 +298,5 @@ add-tags: | $(MULTIMOD)
 	$(MULTIMOD) verify && $(MULTIMOD) tag -m ${MODSET} -c ${COMMIT}
 
 .PHONY: lint-markdown
-lint-markdown: 
+lint-markdown:
 	docker run -v "$(CURDIR):$(WORKDIR)" docker://avtodev/markdown-lint:v1 -c $(WORKDIR)/.markdownlint.yaml $(WORKDIR)/**/*.md
