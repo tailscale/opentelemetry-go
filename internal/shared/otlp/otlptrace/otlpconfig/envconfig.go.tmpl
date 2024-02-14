@@ -36,15 +36,6 @@ var DefaultEnvOptionsReader = envconfig.EnvOptionsReader{
 	Namespace: "OTEL_EXPORTER_OTLP",
 }
 
-// ApplyGRPCEnvConfigs applies the env configurations for gRPC.
-func ApplyGRPCEnvConfigs(cfg Config) Config {
-	opts := getOptionsFromEnv()
-	for _, opt := range opts {
-		cfg = opt.ApplyGRPCOption(cfg)
-	}
-	return cfg
-}
-
 // ApplyHTTPEnvConfigs applies the env configurations for HTTP.
 func ApplyHTTPEnvConfigs(cfg Config) Config {
 	opts := getOptionsFromEnv()
@@ -61,18 +52,18 @@ func getOptionsFromEnv() []GenericOption {
 	DefaultEnvOptionsReader.Apply(
 		envconfig.WithURL("ENDPOINT", func(u *url.URL) {
 			opts = append(opts, withEndpointScheme(u))
-			opts = append(opts, newSplitOption(func(cfg Config) Config {
+			opts = append(opts, newGenericOption(func(cfg Config) Config {
 				cfg.Traces.Endpoint = u.Host
 				// For OTLP/HTTP endpoint URLs without a per-signal
 				// configuration, the passed endpoint is used as a base URL
 				// and the signals are sent to these paths relative to that.
 				cfg.Traces.URLPath = path.Join(u.Path, DefaultTracesPath)
 				return cfg
-			}, withEndpointForGRPC(u)))
+			}))
 		}),
 		envconfig.WithURL("TRACES_ENDPOINT", func(u *url.URL) {
 			opts = append(opts, withEndpointScheme(u))
-			opts = append(opts, newSplitOption(func(cfg Config) Config {
+			opts = append(opts, newGenericOption(func(cfg Config) Config {
 				cfg.Traces.Endpoint = u.Host
 				// For endpoint URLs for OTLP/HTTP per-signal variables, the
 				// URL MUST be used as-is without any modification. The only
@@ -84,7 +75,7 @@ func getOptionsFromEnv() []GenericOption {
 				}
 				cfg.Traces.URLPath = path
 				return cfg
-			}, withEndpointForGRPC(u)))
+			}))
 		}),
 		envconfig.WithCertPool("CERTIFICATE", func(p *x509.CertPool) { tlsConf.RootCAs = p }),
 		envconfig.WithCertPool("TRACES_CERTIFICATE", func(p *x509.CertPool) { tlsConf.RootCAs = p }),
@@ -110,15 +101,6 @@ func withEndpointScheme(u *url.URL) GenericOption {
 		return WithInsecure()
 	default:
 		return WithSecure()
-	}
-}
-
-func withEndpointForGRPC(u *url.URL) func(cfg Config) Config {
-	return func(cfg Config) Config {
-		// For OTLP/gRPC endpoints, this is the target to which the
-		// exporter is going to send telemetry.
-		cfg.Traces.Endpoint = path.Join(u.Host, u.Path)
-		return cfg
 	}
 }
 

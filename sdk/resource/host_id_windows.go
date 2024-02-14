@@ -31,7 +31,6 @@ func (*hostIDReaderWindows) read() (string, error) {
 		registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Cryptography`,
 		registry.QUERY_VALUE|registry.WOW64_64KEY,
 	)
-
 	if err != nil {
 		return "", err
 	}
